@@ -51,17 +51,38 @@ impl MemorySet {
     pub fn token(&self) -> usize {
         self.page_table.token()
     }
-    /// Assume that no conflicts.
-    pub fn insert_framed_area(
-        &mut self,
-        start_va: VirtAddr,
-        end_va: VirtAddr,
-        permission: MapPermission,
-    ) {
+    /// Check if the address range is mapped in any map area
+    pub fn is_mapped(&self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn: VirtPageNum = start_va.floor();
+        let end_vpn: VirtPageNum = end_va.ceil();
+        self.areas.iter().any(|area| {
+            area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn
+        })
+    }
+    /// Insert
+    pub fn insert_framed_area(&mut self, start_va: VirtAddr, end_va: VirtAddr, permission: MapPermission) {
         self.push(
             MapArea::new(start_va, end_va, MapType::Framed, permission),
             None,
         );
+    }
+    /// Remove
+    pub fn remove_framed_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> isize {
+        let start_vpn: VirtPageNum = start_va.floor();
+        let end_vpn: VirtPageNum = end_va.ceil();
+        if let Some((idx, _)) = self.areas.iter().enumerate().find(|(_, area)| {
+            area.vpn_range.get_start() >= start_vpn && area.vpn_range.get_end() <= end_vpn
+        }) {
+            let mut area = self.areas.remove(idx);
+            area.unmap(&mut self.page_table);
+            // unsafe {
+            //     riscv::register::satp::write(self.page_table.token());
+            //     core::arch::asm!("sfence.vma");
+            // }
+            0
+        } else {
+            -1
+        }
     }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
@@ -410,3 +431,4 @@ pub fn remap_test() {
         .executable(),);
     println!("remap_test passed!");
 }
+

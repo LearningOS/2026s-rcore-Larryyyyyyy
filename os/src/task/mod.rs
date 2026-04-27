@@ -17,6 +17,7 @@ mod task;
 use crate::loader::{get_app_data, get_num_app};
 use crate::sync::UPSafeCell;
 use crate::trap::TrapContext;
+use crate::mm::{VirtAddr, MapPermission, MemorySet};
 use alloc::vec::Vec;
 use lazy_static::*;
 use switch::__switch;
@@ -101,6 +102,7 @@ impl TaskManager {
         let mut inner = self.inner.exclusive_access();
         let cur = inner.current_task;
         inner.tasks[cur].task_status = TaskStatus::Exited;
+        inner.tasks[cur].memory_set = MemorySet::new_bare();
     }
 
     /// Find next task to run and return task id.
@@ -153,6 +155,43 @@ impl TaskManager {
             panic!("All applications completed!");
         }
     }
+
+    /// As the name told
+    pub fn find_syscall_times(&self, id: usize) -> usize{
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_counts[id]
+    }
+
+    /// As the name told
+    pub fn add_syscall_times(&self, id: usize) {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_counts[id] += 1;
+    }
+
+    /// As the name told
+    pub fn modify_current_task_mmap(&self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        for task in inner.tasks.iter() {
+            let is_mapped = task.memory_set.is_mapped(start, end);
+            if is_mapped {
+                // println!("mmap error: address range [{:#x}, {:#x}) is already mapped", start.0, end.0);
+                return -1;
+            }
+        }
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.insert_framed_area(start, end, permission);
+        0
+    }
+
+    /// As the name told
+    pub fn modify_current_task_munmap(&self, start: usize, len: usize) -> isize {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].memory_set.remove_framed_area(VirtAddr::from(start), VirtAddr::from(start + len));
+        0
+    }
 }
 
 /// Run the first task in task list.
@@ -201,4 +240,24 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 /// Change the current 'Running' task's program break
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
+}
+
+/// Find syscall times
+pub fn find_syscall_times(id: usize) -> usize {
+    TASK_MANAGER.find_syscall_times(id)
+}
+
+/// Add syscall driven times
+pub fn add_syscall_times(id: usize) {
+    TASK_MANAGER.add_syscall_times(id);
+}
+
+/// Modify mmap
+pub fn modify_current_task_mmap(start: VirtAddr, end: VirtAddr, permission: MapPermission) -> isize {
+    TASK_MANAGER.modify_current_task_mmap(start, end, permission)
+}
+
+/// Modify munmap
+pub fn modify_current_task_munmap(start: usize, len: usize) -> isize {
+    TASK_MANAGER.modify_current_task_munmap(start, len)
 }

@@ -10,7 +10,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     trace!("kernel: sys_write");
     match fd {
         FD_STDOUT => {
-            let buffers = translated_byte_buffer(current_user_token(), buf, len);
+            let buffers = translated_byte_buffer(current_user_token(), buf, len, 1);
             for buffer in buffers {
                 print!("{}", core::str::from_utf8(buffer).unwrap());
             }

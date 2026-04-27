@@ -23,16 +23,6 @@ pub struct VirtPageNum(pub usize);
 
 /// Debugging
 
-impl Debug for VirtAddr {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("VA:{:#x}", self.0))
-    }
-}
-impl Debug for VirtPageNum {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("VPN:{:#x}", self.0))
-    }
-}
 impl Debug for PhysAddr {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!("PA:{:#x}", self.0))
@@ -41,6 +31,16 @@ impl Debug for PhysAddr {
 impl Debug for PhysPageNum {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_fmt(format_args!("PPN:{:#x}", self.0))
+    }
+}
+impl Debug for VirtAddr {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("VA:{:#x}", self.0))
+    }
+}
+impl Debug for VirtPageNum {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("VPN:{:#x}", self.0))
     }
 }
 
