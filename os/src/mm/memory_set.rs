@@ -71,14 +71,10 @@ impl MemorySet {
         let start_vpn: VirtPageNum = start_va.floor();
         let end_vpn: VirtPageNum = end_va.ceil();
         if let Some((idx, _)) = self.areas.iter().enumerate().find(|(_, area)| {
-            area.vpn_range.get_start() >= start_vpn && area.vpn_range.get_end() <= end_vpn
+            area.vpn_range.get_start() < end_vpn && area.vpn_range.get_end() > start_vpn
         }) {
             let mut area = self.areas.remove(idx);
             area.unmap(&mut self.page_table);
-            // unsafe {
-            //     riscv::register::satp::write(self.page_table.token());
-            //     core::arch::asm!("sfence.vma");
-            // }
             0
         } else {
             -1
