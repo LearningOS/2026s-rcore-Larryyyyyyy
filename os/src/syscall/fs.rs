@@ -11,7 +11,7 @@ pub fn sys_write(fd: usize, buf: *const u8, len: usize) -> isize {
     trace!("kernel:pid[{}] sys_write", current_task().unwrap().pid.0);
     match fd {
         FD_STDOUT => {
-            let buffers = translated_byte_buffer(current_user_token(), buf, len);
+            let buffers = translated_byte_buffer(current_user_token(), buf, len, 1);
             for buffer in buffers {
                 print!("{}", core::str::from_utf8(buffer).unwrap());
             }
@@ -39,7 +39,7 @@ pub fn sys_read(fd: usize, buf: *const u8, len: usize) -> isize {
                 }
             }
             let ch = c as u8;
-            let mut buffers = translated_byte_buffer(current_user_token(), buf, len);
+            let mut buffers = translated_byte_buffer(current_user_token(), buf, len, 0);
             unsafe {
                 buffers[0].as_mut_ptr().write_volatile(ch);
             }
