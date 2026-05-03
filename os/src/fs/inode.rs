@@ -1,3 +1,9 @@
+//! `Arc<Inode>` -> `OSInodeInner`: In order to open files concurrently
+//! we need to wrap `Inode` into `Arc`,but `Mutex` in `Inode` prevents
+//! file systems from being accessed simultaneously
+//!
+//! `UPSafeCell<OSInodeInner>` -> `OSInode`: for static `ROOT_INODE`,we
+//! need to wrap `OSInodeInner` into `UPSafeCell`
 use super::File;
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
@@ -9,12 +15,14 @@ use easy_fs::{EasyFileSystem, Inode};
 use lazy_static::*;
 
 /// inode in memory
+/// A wrapper around a filesystem inode
+/// to implement File trait atop
 pub struct OSInode {
     readable: bool,
     writable: bool,
     inner: UPSafeCell<OSInodeInner>,
 }
-/// inner of inode in memory
+/// The OS inode inner in 'UPSafeCell'
 pub struct OSInodeInner {
     offset: usize,
     inode: Arc<Inode>,
@@ -23,16 +31,14 @@ pub struct OSInodeInner {
 impl OSInode {
     /// create a new inode in memory
     pub fn new(readable: bool, writable: bool, inode: Arc<Inode>) -> Self {
-        trace!("kernel: OSInode::new");
         Self {
             readable,
             writable,
             inner: unsafe { UPSafeCell::new(OSInodeInner { offset: 0, inode }) },
         }
     }
-    /// read all data from the inode in memory
+    /// read all data from the inode
     pub fn read_all(&self) -> Vec<u8> {
-        trace!("kernel: OSInode::read_all");
         let mut inner = self.inner.exclusive_access();
         let mut buffer: Vec<u8> = Vec::with_capacity(512);
         buffer.resize(512, 0);
@@ -47,9 +53,25 @@ impl OSInode {
         }
         v
     }
+    /// get base Inode
+    pub fn get_inode(&self) -> Arc<Inode> {
+        let inner = self.inner.exclusive_access();
+        Arc::clone(&inner.inode)
+    }
+    /// get current node id
+    pub fn get_inode_id(&self) -> u64 {
+        let inner = self.inner.exclusive_access();
+        inner.inode.block_id as u64
+    }
+    /// get inode 'block_id' and 'block_offset'
+    pub fn get_inode_pos(&self) -> (usize, usize) {
+        let inner = self.inner.exclusive_access();
+        (inner.inode.block_id, inner.inode.block_offset)
+    }
 }
 
 lazy_static! {
+    /// ???
     pub static ref ROOT_INODE: Arc<Inode> = {
         let efs = EasyFileSystem::open(BLOCK_DEVICE.clone());
         Arc::new(EasyFileSystem::root_inode(&efs))
@@ -97,7 +119,6 @@ impl OpenFlags {
 
 /// Open a file
 pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
-    trace!("kernel: open_file: name = {}, flags = {:?}", name, flags);
     let (readable, writable) = flags.read_write();
     if flags.contains(OpenFlags::CREATE) {
         if let Some(inode) = ROOT_INODE.find(name) {
@@ -121,17 +142,13 @@ pub fn open_file(name: &str, flags: OpenFlags) -> Option<Arc<OSInode>> {
 }
 
 impl File for OSInode {
-    /// file readable?
     fn readable(&self) -> bool {
         self.readable
     }
-    /// file writable?
     fn writable(&self) -> bool {
         self.writable
     }
-    /// read file data into buffer
     fn read(&self, mut buf: UserBuffer) -> usize {
-        trace!("kernel: OSInode::read");
         let mut inner = self.inner.exclusive_access();
         let mut total_read_size = 0usize;
         for slice in buf.buffers.iter_mut() {
@@ -144,9 +161,7 @@ impl File for OSInode {
         }
         total_read_size
     }
-    /// write buffer data into file
     fn write(&self, buf: UserBuffer) -> usize {
-        trace!("kernel: OSInode::write");
         let mut inner = self.inner.exclusive_access();
         let mut total_write_size = 0usize;
         for slice in buf.buffers.iter() {
@@ -157,4 +172,8 @@ impl File for OSInode {
         }
         total_write_size
     }
+    fn as_any(&self) -> &dyn core::any::Any {
+        self
+    }
 }
+

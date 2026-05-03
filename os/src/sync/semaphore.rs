@@ -2,7 +2,7 @@
 
 use crate::sync::UPSafeCell;
 use crate::task::{block_current_and_run_next, current_task, wakeup_task, TaskControlBlock};
-use alloc::{collections::VecDeque, sync::Arc};
+use alloc::{collections::{VecDeque, BTreeMap}, sync::Arc};
 
 /// semaphore structure
 pub struct Semaphore {
@@ -13,6 +13,7 @@ pub struct Semaphore {
 pub struct SemaphoreInner {
     pub count: isize,
     pub wait_queue: VecDeque<Arc<TaskControlBlock>>,
+    pub allocations: BTreeMap<usize, usize>,
 }
 
 impl Semaphore {
@@ -24,25 +25,41 @@ impl Semaphore {
                 UPSafeCell::new(SemaphoreInner {
                     count: res_count as isize,
                     wait_queue: VecDeque::new(),
+                    allocations: BTreeMap::new(),
                 })
             },
         }
     }
 
     /// up operation of semaphore
-    pub fn up(&self) {
+    pub fn up(&self, res_id: usize) {
         trace!("kernel: Semaphore::up");
         let mut inner = self.inner.exclusive_access();
         inner.count += 1;
+        let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+        if let Some(allocation) = inner.allocations.get_mut(&tid) {
+            *allocation -= 1;
+            if *allocation == 0 {
+                inner.allocations.remove(&tid);
+            }
+        } else {
+            panic!("current task does not hold the semaphore!");
+        }
         if inner.count <= 0 {
             if let Some(task) = inner.wait_queue.pop_front() {
+                let target_tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
+                let allocation = inner.allocations.entry(target_tid).or_insert(0);
+                *allocation += 1;
+                let process = task.process.upgrade().unwrap();
+                let mut process_inner = process.inner_exclusive_access();
+                process_inner.need[target_tid][res_id] -= 1;
                 wakeup_task(task);
             }
         }
     }
 
     /// down operation of semaphore
-    pub fn down(&self) {
+    pub fn down(&self, res_id: usize) {
         trace!("kernel: Semaphore::down");
         let mut inner = self.inner.exclusive_access();
         inner.count -= 1;
@@ -50,6 +67,19 @@ impl Semaphore {
             inner.wait_queue.push_back(current_task().unwrap());
             drop(inner);
             block_current_and_run_next();
+        } else {
+            let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
+            let allocation = inner.allocations.entry(tid).or_insert(0);
+            *allocation += 1;
+            let process = current_task().unwrap().process.upgrade().unwrap();
+            let mut process_inner = process.inner_exclusive_access();
+            process_inner.need[tid][res_id] -= 1;
         }
     }
+
+    /// look out the count of the semaphore
+    pub fn get_count(&self) -> isize {
+        self.inner.exclusive_access().count
+    }
 }
+

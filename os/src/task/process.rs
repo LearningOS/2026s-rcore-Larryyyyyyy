@@ -6,7 +6,7 @@ use super::TaskControlBlock;
 use super::{add_task, SignalFlags};
 use super::{pid_alloc, PidHandle};
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE};
+use crate::mm::{translated_refmut, MemorySet, KERNEL_SPACE, VirtAddr, MapPermission};
 use crate::sync::{Condvar, Mutex, Semaphore, UPSafeCell};
 use crate::trap::{trap_handler, TrapContext};
 use alloc::string::String;
@@ -49,6 +49,14 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// whether enable deadlock detect
+    pub enable_deadlock_detect: bool,
+    /// thread request
+    pub need: Vec<Vec<usize>>,
+    // /// available resources for this process
+    // pub available: Vec<usize>,
+    // /// thread i has acquired resource j some times
+    // pub allocation: Vec<Vec<usize>>,
 }
 
 impl ProcessControlBlockInner {
@@ -119,6 +127,10 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    enable_deadlock_detect: false,
+                    need: Vec::new(),
+                    // available: Vec::new(),
+                    // allocation: Vec::new(),
                 })
             },
         });
@@ -245,6 +257,10 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    enable_deadlock_detect: false,
+                    need: Vec::new(),
+                    // available: Vec::new(),
+                    // allocation: Vec::new(),
                 })
             },
         });
@@ -278,8 +294,176 @@ impl ProcessControlBlock {
         add_task(task);
         child
     }
+    /// Mmap
+    pub fn mmap(&self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> isize {
+        let mut inner = self.inner_exclusive_access();
+        if inner.memory_set.is_mapped(start, end) {
+            return -1;
+        }
+        inner.memory_set.insert_framed_area(start, end, permission);
+        0
+    }
+    /// Munmap
+    pub fn munmap(&self, start: VirtAddr, end: VirtAddr) -> isize {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.remove_framed_area(start, end)
+    }
+    /// Spawn
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let (memory_set, ustack_base, entry_point) = MemorySet::from_elf(elf_data);
+        let pid_handle = pid_alloc();
+        let process = Arc::new(ProcessControlBlock {
+            pid: pid_handle,
+            inner: unsafe { UPSafeCell::new(ProcessControlBlockInner {
+                is_zombie: false,
+                memory_set,
+                parent: Some(Arc::downgrade(self)),
+                children: Vec::new(),
+                exit_code: 0,
+                fd_table: vec![
+                    // 0 -> stdin
+                    Some(Arc::new(Stdin)),
+                    // 1 -> stdout
+                    Some(Arc::new(Stdout)),
+                    // 2 -> stderr
+                    Some(Arc::new(Stdout)),
+                ],
+                signals: SignalFlags::empty(),
+                tasks: Vec::new(),
+                task_res_allocator: RecycleAllocator::new(),
+                mutex_list: Vec::new(),
+                semaphore_list: Vec::new(),
+                condvar_list: Vec::new(),
+                enable_deadlock_detect: false,
+                need: Vec::new(),
+                // available: Vec::new(),
+                // allocation: Vec::new(),
+            })},
+        });
+        let task = Arc::new(TaskControlBlock::new(
+            Arc::clone(&process),
+            ustack_base,
+            true,
+        ));
+        let mut task_inner = task.inner_exclusive_access();
+        let trap_cx = task_inner.get_trap_cx();
+        let ustack_top = task_inner.res.as_ref().unwrap().ustack_top();
+        let kstack_top = task.kstack.get_top();
+        task_inner.stride = 0;
+        task_inner.pass = 16;
+        *trap_cx = TrapContext::app_init_context(
+            entry_point,
+            ustack_top,
+            KERNEL_SPACE.exclusive_access().token(),
+            kstack_top,
+            trap_handler as usize,
+        );
+        drop(task_inner);
+
+        let mut process_inner = process.inner_exclusive_access();
+        process_inner.tasks.push(Some(Arc::clone(&task)));
+        drop(process_inner);
+        
+        insert_into_pid2process(process.getpid(), Arc::clone(&process));
+        add_task(task);
+        process
+    }
+    /// update available
+    fn update_available(&self, inner: &ProcessControlBlockInner) -> Vec<usize> {
+        let mut available = Vec::new();
+        for mutex_opt in inner.mutex_list.iter() {
+            if let Some(mutex) = mutex_opt {
+                if mutex.is_locked() {
+                    available.push(0);
+                } else {
+                    available.push(1);
+                }
+            }
+        }
+        for sem_opt in inner.semaphore_list.iter() {
+            if let Some(sem) = sem_opt {
+                let count = sem.get_count() as isize;
+                if count < 0 {
+                    available.push(0);
+                } else {
+                    available.push(count as usize);
+                }
+            }
+        }
+        available
+    }
+    /// update allocation
+    fn update_allocation(&self, inner: &ProcessControlBlockInner) -> Vec<Vec<usize>> {
+        let mut allocation = Vec::new();
+        for _ in 0..inner.tasks.len() {
+            allocation.push(vec![0; inner.mutex_list.len() + inner.semaphore_list.len()]);
+        }
+        let mut cnt = 0;
+        for mutex_opt in inner.mutex_list.iter() {
+            if let Some(mutex) = mutex_opt {
+                match mutex.get_owner() {
+                    Some(tid) => allocation[tid][cnt] = 1,
+                    None => {}
+                }
+            }
+            cnt += 1;
+        }
+        for sem_opt in inner.semaphore_list.iter() {
+            if let Some(sem) = sem_opt {
+                for (tid, times) in sem.inner.exclusive_access().allocations.iter() {
+                    allocation[*tid][cnt] = *times;
+                }
+            }
+            cnt += 1;
+        }
+        allocation
+    }
+    /// as its name told
+    pub fn check_deadlock(&self, inner: &ProcessControlBlockInner, tid: usize, res_id: usize) -> bool {
+        let n = inner.tasks.len();
+        let m = inner.mutex_list.len() + inner.semaphore_list.len();
+        let mut work = self.update_available(inner);
+        let allocation = self.update_allocation(inner);
+        let mut finish = vec![false; n];
+        if res_id < inner.mutex_list.len() {
+            if inner.mutex_list[res_id].as_ref().unwrap().is_locked() && inner.mutex_list[res_id].as_ref().unwrap().get_owner() == Some(tid) {
+                return true;
+            }
+        }
+        loop {
+            let mut found = false;
+            for i in 0..n {
+                if !finish[i] {
+                    let mut can_finish = true;
+                    for j in 0..m {
+                        if inner.need[i][j] > work[j] {
+                            can_finish = false;
+                            break;
+                        }
+                    }
+                    if can_finish {
+                        for j in 0..m {
+                            work[j] += allocation[i][j];
+                        }
+                        finish[i] = true;
+                        found = true;
+                    }
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+        for i in 0..n {
+            if !finish[i] {
+                return true;
+            }
+        }
+        false
+    }
     /// get pid
     pub fn getpid(&self) -> usize {
         self.pid.0
     }
 }
+
