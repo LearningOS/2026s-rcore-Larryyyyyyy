@@ -156,9 +156,10 @@ pub fn sys_semaphore_up(sem_id: usize) -> isize {
     let process = current_process();
     let process_inner = process.inner_exclusive_access();
     let mutex_count = process_inner.mutex_list.len();
+    let deadlock_detect = process_inner.enable_deadlock_detect;
     let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
     drop(process_inner);
-    sem.up(sem_id + mutex_count);
+    sem.up(sem_id + mutex_count, deadlock_detect);
     0
 }
 /// semaphore down syscall
@@ -179,12 +180,13 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
     let mutex_count = process_inner.mutex_list.len();
     // let sem_count = process_inner.semaphore_list.len();
     let tid = current_task().unwrap().inner_exclusive_access().res.as_ref().unwrap().tid;
-    while tid >= process_inner.need.len() {
-        for _ in 0..100 {
-            process_inner.need.push(vec![0; /* mutex_count + sem_count */ 100]);
+    let deadlock_detect = process_inner.enable_deadlock_detect;
+    if deadlock_detect {
+        while tid >= process_inner.need.len() {
+            for _ in 0..100 {
+                process_inner.need.push(vec![0; /* mutex_count + sem_count */ 100]);
+            }
         }
-    }
-    if process_inner.enable_deadlock_detect {
         process_inner.need[tid][sem_id + mutex_count] += 1;
         if process.check_deadlock(&process_inner, tid, sem_id + mutex_count) {
             process_inner.need[tid][sem_id + mutex_count] -= 1;
@@ -193,7 +195,7 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
     }
     let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
     drop(process_inner);
-    sem.down(sem_id + mutex_count);
+    sem.down(sem_id + mutex_count, deadlock_detect);
     0
 }
 /// condvar create syscall
